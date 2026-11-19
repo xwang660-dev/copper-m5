@@ -11,6 +11,14 @@
 // back. The agent that ends the turn answers the next message too.
 import { hasToolCall, stepCountIs } from "ai";
 import { callStream, THOUGHT_SUMMARIES } from "@/lib/ai/call";
+import {
+  errorMessage,
+  flushTraces,
+  generationFor,
+  startTurn,
+  type ToolTrace,
+  type TraceParent,
+} from "@/lib/ai/langfuse";
 import { createLive, type Live } from "@/lib/ai/live";
 import {
   COPPER_HANDOFF,
@@ -62,10 +70,15 @@ const STOP = [
 const SORRY = "Sorry, something went wrong on my end. Please try again.";
 
 /** One agent's call: its instructions and only its own tools. */
-function agentCall(agent: Agent, messages: ChatMessage[], desk?: Desk) {
+function agentCall(
+  agent: Agent,
+  messages: ChatMessage[],
+  desk: Desk | undefined,
+  parent: TraceParent | undefined,
+) {
   if (agent === "refund" && desk)
     return callStream(
-      { module: 4, feature: "refund-agent" },
+      { module: 4, feature: "refund-agent", parent },
       {
         messages,
         providerOptions: THOUGHT_SUMMARIES,
@@ -75,7 +88,7 @@ function agentCall(agent: Agent, messages: ChatMessage[], desk?: Desk) {
       },
     );
   return callStream(
-    { module: 2, feature: "ask-copper" },
+    { module: 2, feature: "ask-copper", parent },
     {
       messages,
       providerOptions: THOUGHT_SUMMARIES,
@@ -98,6 +111,13 @@ export async function askCopper({
 }: AskCopperRequest): Promise<AskCopperResult> {
   const { live, update, done } = createLive<Progress>();
   const first: Agent = desk && useTools ? agent : "copper";
+  // One Langfuse trace per turn: the agents, their tool calls, tokens, cost
+  // and time all hang under it. It does nothing without Langfuse keys.
+  const turn = startTurn("ask-copper-turn", messages.at(-1)?.content, {
+    useTools,
+    firstAgent: first,
+    onSupportPage: Boolean(desk),
+  });
   const progress: Progress = {
     steps: [],
     reply: "",
@@ -124,6 +144,8 @@ export async function askCopper({
     result: ReturnType<typeof callStream>,
   ): Promise<Agent | undefined> {
     let handoff: Agent | undefined;
+    const generation = generationFor(result);
+    const traces = new Map<string, ToolTrace>();
     for await (const part of result.fullStream) {
       switch (part.type) {
         case "reasoning-delta": {
@@ -148,6 +170,11 @@ export async function askCopper({
           });
           break;
         case "tool-call": {
+          if (generation)
+            traces.set(
+              part.toolCallId,
+              generation.tool(part.toolName, part.input),
+            );
           const step = toolStep(part.toolCallId);
           if (step) step.input = part.input;
           else
@@ -162,6 +189,7 @@ export async function askCopper({
           break;
         }
         case "tool-result": {
+          traces.get(part.toolCallId)?.end({ output: part.output });
           const step = toolStep(part.toolCallId);
           if (step) Object.assign(step, { output: part.output, state: "done" });
           if (part.toolName in HANDOFF_TOOLS)
@@ -174,6 +202,7 @@ export async function askCopper({
             part.error instanceof Error
               ? part.error.message
               : String(part.error);
+          traces.get(part.toolCallId)?.end({ error: message });
           if (step) Object.assign(step, { output: message, state: "error" });
           break;
         }
@@ -199,7 +228,7 @@ export async function askCopper({
         await follow(
           "copper",
           callStream(
-            { module: 2, feature: "ask-copper" },
+            { module: 2, feature: "ask-copper", parent: turn.parent },
             { messages, providerOptions: THOUGHT_SUMMARIES },
           ),
         );
@@ -208,7 +237,7 @@ export async function askCopper({
         for (let handoffs = 0; ; handoffs++) {
           const next = await follow(
             current,
-            agentCall(current, messages, desk),
+            agentCall(current, messages, desk, turn.parent),
           );
           if (!next || next === current || handoffs >= MAX_HANDOFFS) break;
           progress.steps.push({ type: "handoff", from: current, to: next });
@@ -220,10 +249,14 @@ export async function askCopper({
       }
       progress.status = "done";
       if (!progress.reply.trim()) progress.reply = SORRY;
-    } catch {
+      turn.end({ output: progress.reply });
+    } catch (error) {
       progress.status = "error";
       if (!progress.reply.trim()) progress.reply = SORRY;
+      turn.end({ output: progress.reply, error: errorMessage(error) });
     }
+    // Send the trace to Langfuse before the server can stop.
+    await flushTraces();
     done(snapshot());
   })();
 

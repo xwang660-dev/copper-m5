@@ -8,11 +8,18 @@ import {
   MODELS,
   type ModelId,
 } from "@/lib/ai/models";
+import {
+  errorMessage,
+  rememberGeneration,
+  startGeneration,
+  type TraceParent,
+} from "@/lib/ai/langfuse";
 import { costUsd } from "@/lib/ai/pricing";
 
 // Every model call in the app goes through this file, so each one is logged
 // with its tokens, cost and how long it took. The log goes to the terminal
-// running the app, as a line starting "[ai_calls]".
+// running the app, as a line starting "[ai_calls]". When Langfuse is set up
+// (lib/ai/langfuse.ts), the same call is also sent there as a generation.
 
 export class AiNotConfiguredError extends Error {
   constructor() {
@@ -28,7 +35,13 @@ export function isAiConfigured(): boolean {
 }
 
 /** Which module and feature made the call, for the ai_calls log. */
-export type CallInfo = { module: number; feature: string; model?: ModelId };
+export type CallInfo = {
+  module: number;
+  feature: string;
+  model?: ModelId;
+  /** The Langfuse trace this call belongs to (a chat turn), if any. */
+  parent?: TraceParent;
+};
 
 // Omit that keeps generateText's "prompt or messages" union intact.
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
@@ -95,25 +108,44 @@ function rowFor(info: CallInfo, model: ModelId, started: number) {
   };
 }
 
-async function tracked<T extends { usage: Usage }>(
+/** What went into a call, for the Langfuse trace. */
+function inputOf(options: { prompt?: unknown; messages?: unknown }) {
+  return options.messages ?? options.prompt;
+}
+
+async function tracked<T extends { usage: Usage; text?: string }>(
   info: CallInfo,
+  input: unknown,
   run: (model: ModelId) => Promise<T>,
 ): Promise<T> {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
+  const trace = startGeneration(info.parent, {
+    name: info.feature,
+    model: model.slice("google/".length),
+    input,
+    metadata: { module: info.module, feature: info.feature },
+  });
   try {
     const result = await run(model);
-    await logCall(row(true, result.usage));
+    const done = row(true, result.usage);
+    await logCall(done);
+    trace.end({
+      output: result.text,
+      usage: result.usage,
+      costUsd: done.cost_usd,
+    });
     return result;
   } catch (error) {
     if (!(error instanceof AiNotConfiguredError)) await logCall(row(false));
+    trace.end({ error: errorMessage(error) });
     throw error;
   }
 }
 
 /** Generates text. Example: callText({ module: 3, feature: "support-answer" }, { prompt }) */
 export async function callText(info: CallInfo, options: TextOptions) {
-  return tracked(info, (model) =>
+  return tracked(info, inputOf(options), (model) =>
     generateText({ ...options, model: languageModel(model) }),
   );
 }
@@ -124,7 +156,7 @@ export async function callObject<Schema extends z.ZodType>(
   options: TextOptions & { schema: Schema },
 ) {
   const { schema, ...rest } = options;
-  const result = await tracked(info, (model) =>
+  const result = await tracked(info, inputOf(rest), (model) =>
     generateText({
       ...rest,
       model: languageModel(model),
@@ -158,6 +190,12 @@ export async function callEmbedMany(
       ok,
       created_at: new Date().toISOString(),
     });
+  const trace = startGeneration(undefined, {
+    name: info.feature,
+    model: EMBEDDING_MODEL.slice("google/".length),
+    input: `${values.length} texts`,
+    metadata: { module: info.module, feature: info.feature },
+  });
   try {
     const result = await embedMany({
       model: google().embedding(EMBEDDING_MODEL.slice("google/".length)),
@@ -167,9 +205,11 @@ export async function callEmbedMany(
       },
     });
     await log(true);
+    trace.end({ output: `${result.embeddings.length} embeddings` });
     return result;
   } catch (error) {
     if (!(error instanceof AiNotConfiguredError)) await log(false);
+    trace.end({ error: errorMessage(error) });
     throw error;
   }
 }
@@ -187,12 +227,28 @@ type StreamOptions = DistributiveOmit<
 export function callStream(info: CallInfo, options: StreamOptions) {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
-  return streamText({
+  const trace = startGeneration(info.parent, {
+    name: info.feature,
+    model: model.slice("google/".length),
+    input: inputOf(options),
+    metadata: { module: info.module, feature: info.feature },
+  });
+  const result = streamText({
     ...options,
     model: languageModel(model),
-    onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),
-    onError: () => logCall(row(false)),
+    onFinish: ({ totalUsage, text }) => {
+      const done = row(true, totalUsage);
+      trace.end({ output: text, usage: totalUsage, costUsd: done.cost_usd });
+      return logCall(done);
+    },
+    onError: ({ error }) => {
+      trace.end({ error: errorMessage(error) });
+      return logCall(row(false));
+    },
   });
+  // The chat hangs each tool call under this generation.
+  rememberGeneration(result, trace);
+  return result;
 }
 
 // Asking for some thinking (rather than letting the model decide) is what

@@ -185,3 +185,25 @@ off. The golden-set evaluation joins the same workflow in Part 3.
 **Risks and open questions:** The live Google test only runs when the key is
 set; the key will go in the repo's Actions secrets when the evaluation needs
 it, never in the code.
+
+## Module 5 Part 2: Langfuse tracing
+
+**Summary:** Every chat turn on Ask Copper is one Langfuse trace
+(`ask-copper-turn`). Under it, each agent call (Copper, Refund agent) is a
+generation with its model, input and output tokens, cost in US dollars and how
+long it took, and each tool call (`request_refund`, `get_order`, handoffs) is a
+tool span under the agent that made it. The cost comes from `lib/ai/pricing.ts`,
+the same numbers as the `[ai_calls]` log line, so Langfuse needs no price table
+of its own. The code is `lib/ai/langfuse.ts` (what gets recorded),
+`lib/ai/langfuse-register.ts` and `instrumentation.ts` (connect it to Langfuse
+when the server starts), with the hooks in `lib/ai/call.ts` and
+`lib/copper/assistant/ask.ts`. Other AI calls (`callText`, `callObject`,
+`callEmbedMany`) are recorded as single generations.
+
+Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` in
+`.env.local` (and in Vercel). Without the keys tracing is off and the app runs
+as before.
+
+**Risks and open questions:** Inputs and outputs of the chat are sent to
+Langfuse as text, so the project must hold only fictional customer data. On
+Vercel each span is sent at once, because a function can stop after it replies.
