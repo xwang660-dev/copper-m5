@@ -171,3 +171,17 @@ the tests and a golden-set evaluation with an AI judge run in GitHub Actions
 on every pull request, with `main` protected; every AI call is traced in
 Langfuse; and one support agent that does everything is compared with the two
 agents on the same golden set. Langfuse is the only eval and monitoring tool.
+
+## Module 5 Part 1: Tests in CI and a protected main
+
+**Summary:** `.github/workflows/ci.yml` runs lint, typecheck, the tests and a
+production build on Ubuntu, macOS and Windows for every push and pull request.
+`main` is protected: changes go in only through a pull request, and the three
+checks (`check (ubuntu-latest)`, `check (macos-latest)`,
+`check (windows-latest)`) must pass and be up to date before it can merge. The
+rule also applies to the repo owner, and force pushes and deleting `main` are
+off. The golden-set evaluation joins the same workflow in Part 3.
+
+**Risks and open questions:** The live Google test only runs when the key is
+set; the key will go in the repo's Actions secrets when the evaluation needs
+it, never in the code.
