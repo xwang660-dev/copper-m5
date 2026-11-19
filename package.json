@@ -12,6 +12,7 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
+    "eval": "vitest run --config vitest.eval.config.mts",
     "format": "prettier --write .",
     "start-module": "node scripts/start-module.mjs",
     "env:check": "node scripts/check-env.mjs",

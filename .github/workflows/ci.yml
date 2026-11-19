@@ -23,3 +23,31 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # The golden-set evaluation: the real model answers every question, an AI
+  # judge grades each answer, and the scores go to Langfuse. It runs on pull
+  # requests only (it calls the model, so not on every push) and must pass to
+  # merge. The keys are in the repo's Actions secrets.
+  eval:
+    name: eval
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: eval-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run eval
+        env:
+          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+          EVAL_RUN: github-${{ github.run_id }}-${{ github.run_attempt }}
+          EVAL_VARIANT: two-agents

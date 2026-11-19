@@ -43,12 +43,18 @@ export type GenerationTrace = {
 export type TurnTrace = {
   /** Pass this as `parent` in the call info so calls land in this trace. */
   parent: TraceParent | undefined;
+  /** The trace's id, for attaching scores to it. Undefined when tracing is off. */
+  traceId: string | undefined;
   end: (result: { output?: unknown; error?: string }) => void;
 };
 
 const NO_TOOL: ToolTrace = { end: () => {} };
 const NO_GENERATION: GenerationTrace = { tool: () => NO_TOOL, end: () => {} };
-const NO_TURN: TurnTrace = { parent: undefined, end: () => {} };
+const NO_TURN: TurnTrace = {
+  parent: undefined,
+  traceId: undefined,
+  end: () => {},
+};
 
 /** Starts the root span for one chat turn (the trace name is `name`). */
 export function startTurn(
@@ -60,6 +66,7 @@ export function startTurn(
   const span = startObservation(name, { input, metadata });
   return {
     parent: span,
+    traceId: span.traceId,
     end({ output, error }) {
       span.update(
         error ? { output, level: "ERROR", statusMessage: error } : { output },
