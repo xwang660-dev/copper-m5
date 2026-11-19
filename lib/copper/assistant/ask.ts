@@ -46,9 +46,24 @@ export type AskCopperRequest = {
   desk?: Desk;
   /** Who answers first: whoever ended the last turn. Copper by default. */
   agent?: Agent;
+  /** Labels for the Langfuse trace (an eval run, say). Short text only. */
+  traceLabels?: Record<string, string>;
 };
 
-export type AskCopperResult = { progress: Live<Progress> };
+export type AskCopperResult = {
+  progress: Live<Progress>;
+  /** The Langfuse trace of this turn, when tracing is on. */
+  traceId?: string;
+};
+
+/** Only a few short labels reach the trace, whoever sent them. */
+function cleanLabels(labels: Record<string, string> | undefined) {
+  return Object.fromEntries(
+    Object.entries(labels ?? {})
+      .slice(0, 5)
+      .map(([key, value]) => [key.slice(0, 40), String(value).slice(0, 100)]),
+  );
+}
 
 /** At most this many model steps (tool calls plus the reply) per agent. */
 const MAX_STEPS = 5;
@@ -108,6 +123,7 @@ export async function askCopper({
   useTools,
   desk,
   agent = "copper",
+  traceLabels,
 }: AskCopperRequest): Promise<AskCopperResult> {
   const { live, update, done } = createLive<Progress>();
   const first: Agent = desk && useTools ? agent : "copper";
@@ -117,6 +133,7 @@ export async function askCopper({
     useTools,
     firstAgent: first,
     onSupportPage: Boolean(desk),
+    ...cleanLabels(traceLabels),
   });
   const progress: Progress = {
     steps: [],
@@ -253,6 +270,8 @@ export async function askCopper({
     } catch (error) {
       progress.status = "error";
       if (!progress.reply.trim()) progress.reply = SORRY;
+      // The customer sees a short apology; the server log says what broke.
+      console.error("[ask-copper] the turn failed:", errorMessage(error));
       turn.end({ output: progress.reply, error: errorMessage(error) });
     }
     // Send the trace to Langfuse before the server can stop.
@@ -260,5 +279,5 @@ export async function askCopper({
     done(snapshot());
   })();
 
-  return { progress: live };
+  return { progress: live, traceId: turn.traceId };
 }

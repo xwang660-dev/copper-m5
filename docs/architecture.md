@@ -207,3 +207,35 @@ as before.
 **Risks and open questions:** Inputs and outputs of the chat are sent to
 Langfuse as text, so the project must hold only fictional customer data. On
 Vercel each span is sent at once, because a function can stop after it replies.
+
+## Module 5 Part 3: Golden set and AI judge
+
+**Summary:** `evals/golden-set.ts` holds 14 questions a customer really asks
+(prices, totals, stock, policy with sources, an error code, off-topic, a request
+for internal documents, a prompt injection, and six refund cases: under the
+limit, over it, a fake "a supervisor approved it", a $0 limit, an unknown order
+and a refund a person already rejected). Each has `expected` (what a good
+answer does, in plain English) and optional `mustCall` / `mustNotCall` tools.
+`npm run eval` (`evals/golden.eval.ts`) asks Ask Copper each question through
+the real chat, then `evals/judge.ts` has Gemini grade the answer 1 to 5 against
+`expected`, looking at the tool results too. A case passes when the judge gives
+at least 4 and the plain-code tool check passes. The scores `judge_score`,
+`tools_ok` and `case_pass` go to Langfuse on the answer's trace
+(`evals/scores.ts`, the REST scores API), and the run fails when fewer than 80%
+of the cases pass (`EVAL_MIN_PASS_RATE`). The judge is an ordinary model call
+through `lib/ai/call.ts`, so it is logged and traced like the rest.
+
+In GitHub Actions the `eval` job in `.github/workflows/ci.yml` runs this on
+every pull request, writes the table to the run's summary, and is a required
+check on `main`. The keys are the Actions secrets
+`GOOGLE_GENERATIVE_AI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and
+`LANGFUSE_BASE_URL`. In CI a missing key fails the job instead of skipping it.
+Locally the eval skips itself without a Google key. `EVAL_ONLY=id1,id2` runs
+just those cases; `EVAL_VARIANT` labels the agent setup being graded.
+
+**Risks and open questions:** The judge is a model, so scores vary a little from
+run to run, which is why the bar is 80% and not 100%. The judge and the
+chatbot are the same model family, which can flatter the answers. A few
+test-data mistakes taught us to keep each case's `expected` about the outcome,
+not about which tool the agent used: an answer built on `get_orders` is as good
+as one built on `request_refund`.
