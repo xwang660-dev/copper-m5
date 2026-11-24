@@ -24,6 +24,7 @@ import {
   COPPER_HANDOFF,
   COPPER_INSTRUCTIONS,
   REFUND_AGENT_INSTRUCTIONS,
+  SINGLE_AGENT_INSTRUCTIONS,
 } from "@/lib/copper/assistant/instructions";
 import type {
   Agent,
@@ -33,6 +34,7 @@ import type {
 import {
   copperTools,
   refundAgentTools,
+  singleAgentTools,
   transferToRefundAgent,
 } from "@/lib/copper/assistant/tools";
 import type { Desk } from "@/lib/copper/orders";
@@ -46,6 +48,12 @@ export type AskCopperRequest = {
   desk?: Desk;
   /** Who answers first: whoever ended the last turn. Copper by default. */
   agent?: Agent;
+  /**
+   * "multi" (the default) is Copper plus the Refund agent. "single" is one
+   * agent with every tool and no handoff, built to compare against it in the
+   * evals. The Support page always uses "multi".
+   */
+  agentMode?: "multi" | "single";
   /** Labels for the Langfuse trace (an eval run, say). Short text only. */
   traceLabels?: Record<string, string>;
 };
@@ -124,15 +132,18 @@ export async function askCopper({
   desk,
   agent = "copper",
   traceLabels,
+  agentMode = "multi",
 }: AskCopperRequest): Promise<AskCopperResult> {
   const { live, update, done } = createLive<Progress>();
-  const first: Agent = desk && useTools ? agent : "copper";
+  const single = agentMode === "single" && Boolean(desk) && useTools;
+  const first: Agent = desk && useTools && !single ? agent : "copper";
   // One Langfuse trace per turn: the agents, their tool calls, tokens, cost
   // and time all hang under it. It does nothing without Langfuse keys.
   const turn = startTurn("ask-copper-turn", messages.at(-1)?.content, {
     useTools,
     firstAgent: first,
     onSupportPage: Boolean(desk),
+    agentMode: single ? "single" : "multi",
     ...cleanLabels(traceLabels),
   });
   const progress: Progress = {
@@ -247,6 +258,21 @@ export async function askCopper({
           callStream(
             { module: 2, feature: "ask-copper", parent: turn.parent },
             { messages, providerOptions: THOUGHT_SUMMARIES },
+          ),
+        );
+      } else if (single && desk) {
+        // One agent, every tool, no handoff.
+        await follow(
+          "copper",
+          callStream(
+            { module: 5, feature: "single-agent", parent: turn.parent },
+            {
+              messages,
+              providerOptions: THOUGHT_SUMMARIES,
+              instructions: SINGLE_AGENT_INSTRUCTIONS,
+              tools: singleAgentTools(desk),
+              stopWhen: stepCountIs(MAX_STEPS),
+            },
           ),
         );
       } else {

@@ -239,3 +239,34 @@ chatbot are the same model family, which can flatter the answers. A few
 test-data mistakes taught us to keep each case's `expected` about the outcome,
 not about which tool the agent used: an answer built on `get_orders` is as good
 as one built on `request_refund`.
+
+## Module 5 Part 4: Single agent vs multi agent
+
+**Summary:** The app is multi-agent: Copper hands refunds to the Refund agent,
+which has its own instructions and tools. Part 4 adds a single-agent version
+to compare against it: one support agent with every tool (Copper's and the
+Refund agent's) and no handoff (`SINGLE_AGENT_INSTRUCTIONS` in
+`lib/copper/assistant/instructions.ts`, `singleAgentTools` in `tools.ts`). It is
+chosen by the `agentMode: "single"` option of `askCopper`; the Support page
+always uses the default, `"multi"`, so nothing changes for customers. Both
+setups use the same refund rule in `lib/copper/orders.ts`, so the app, not the
+model, still decides every refund.
+
+`npm run eval` runs the golden set on both setups. Each answer's trace in
+Langfuse carries `variant` (`two-agents` or `single-agent`), `evalRun` and
+`caseId` in its metadata, plus the scores, so the two can be compared there:
+filter traces by `variant` for cost and latency, and scores by their comment.
+The report (`evals/report.ts`) puts pass rate, average judge grade, cost,
+time and tokens per question side by side. In GitHub Actions the `eval` job posts
+it as one comment on the pull request (kept up to date on every push) and in
+the run's summary. Cost is the answer's own model calls (read from the meter in
+`lib/ai/call.ts`, not counting the judge); time is the wall-clock time from the
+question to the finished answer. Only the `two-agents` setup, the one the app
+ships, must reach the pass-rate bar; the single agent is reported, not gated.
+`EVAL_VARIANTS` and `EVAL_GATE_VARIANT` change that.
+
+**Risks and open questions:** Pass rates on 14 questions move by a case or two
+between runs, so a small gap between the setups isn't proof. The single agent
+sometimes sends `request_refund` an order id in the wrong format, then
+recovers, which costs it an extra tool call. Whichever setup is shipped, keep
+the refund rule in code.
