@@ -28,6 +28,8 @@ const VARIANTS = (process.env.EVAL_VARIANTS?.split(",").map((v) => v.trim()) ??
   ALL_VARIANTS) as Variant[];
 /** The setup the app ships today. CI holds this one to the pass-rate bar. */
 const GATE = (process.env.EVAL_GATE_VARIANT ?? "two-agents") as Variant;
+/** Wait between questions, in ms, to stay under the rate limit. */
+const PAUSE_MS = Number(process.env.EVAL_PAUSE_MS ?? "4000");
 /** EVAL_ONLY=id1,id2 runs just those cases (to look into a failure). */
 const ONLY = process.env.EVAL_ONLY?.split(",").map((id) => id.trim());
 
@@ -55,8 +57,8 @@ async function runOnce(
     usageMeter.inputTokens +
     usageMeter.outputTokens -
     (before.inputTokens + before.outputTokens);
-  if (final.status === "error")
-    throw new Error("The chat ended with an error.");
+  if (final.status === "error" || APOLOGY.test(final.reply))
+    throw new Error("The chat ended with an error or an empty reply.");
   const answer: Answer = { reply: final.reply, tools: toolCallsOf(final) };
   const verdict = await judge(golden, answer);
   const tools = toolsOk(golden, answer, variant);
@@ -101,20 +103,27 @@ async function runOnce(
   };
 }
 
+/** The chat's fallback when the model gave nothing back (see ask.ts). */
+const APOLOGY = /something went wrong on my end/i;
+
+/** Quota and rate-limit errors need a longer wait than other hiccups. */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * Tries a case up to three times, waiting longer each time: a busy model
- * service shouldn't fail the whole run. A wrong answer is not retried, only a
- * chat that ended with an error.
+ * Tries a case up to four times, waiting longer each time. A busy or
+ * rate-limited model service (an error, or an empty reply that the chat turns
+ * into an apology) says nothing about the answers, so it is retried and not
+ * graded. A wrong answer is never retried.
  */
 async function runCase(
   golden: GoldenCase,
   variant: Variant,
 ): Promise<CaseResult> {
-  for (const wait of [8_000, 20_000]) {
+  for (const wait of [10_000, 30_000, 60_000]) {
     try {
       return await runOnce(golden, variant);
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, wait));
+      await sleep(wait);
     }
   }
   return runOnce(golden, variant);
@@ -145,6 +154,8 @@ describe("golden set", () => {
           async () => {
             const result = await runCase(golden, variant);
             results.get(variant)?.push(result);
+            // Stay under the model service's requests-per-minute limit.
+            await sleep(PAUSE_MS);
             // Only the shipped setup fails the run on a bad case; the other
             // is being compared, and its numbers go in the report.
             if (variant === GATE)
@@ -153,7 +164,7 @@ describe("golden set", () => {
                 `${result.reason} (judge ${result.score}/5, tools ${result.tools ? "ok" : "wrong"})`,
               ).toBe(true);
           },
-          180_000,
+          300_000,
         );
     });
 
