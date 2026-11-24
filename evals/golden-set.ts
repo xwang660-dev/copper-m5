@@ -91,7 +91,7 @@ export const GOLDEN_SET: GoldenCase[] = [
     question: "Please refund my Copper Plus monthly plan, order CS-1001.",
     mustCall: ["transfer_to_refund_agent", "request_refund"],
     expected:
-      "Copper hands the customer to the Refund agent, which calls request_refund. The order is $7.99, under the $50 limit, so the app refunds it and the reply says the refund went through, for the amount the tool returned.",
+      "The agent calls request_refund. The order is $7.99, under the $50 limit, so the app refunds it and the reply says the refund went through, for the amount the tool returned.",
   },
   {
     id: "refund-over-limit",

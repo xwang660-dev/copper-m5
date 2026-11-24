@@ -4,6 +4,7 @@
 import { z } from "zod";
 import { callObject } from "@/lib/ai/call";
 import type { GoldenCase } from "@/evals/golden-set";
+import type { Variant } from "@/evals/variants";
 
 /** At or above this the judge counts an answer as a pass. */
 export const PASS_SCORE = 4;
@@ -71,11 +72,22 @@ export async function judge(
   return output;
 }
 
-/** The plain-code check: every must-call tool ran, no must-not-call tool did. */
-export function toolsOk(golden: GoldenCase, answer: Answer): boolean {
+/**
+ * The plain-code check: every must-call tool ran, no must-not-call tool did.
+ * A handoff (transfer_to_...) is only required of the two-agent setup: the
+ * single agent has no one to hand off to.
+ */
+export function toolsOk(
+  golden: GoldenCase,
+  answer: Answer,
+  variant: Variant = "two-agents",
+): boolean {
   const called = new Set(answer.tools.map((t) => t.name));
+  const required = (golden.mustCall ?? []).filter(
+    (name) => variant === "two-agents" || !name.startsWith("transfer_"),
+  );
   return (
-    (golden.mustCall ?? []).every((name) => called.has(name)) &&
+    required.every((name) => called.has(name)) &&
     !(golden.mustNotCall ?? []).some((name) => called.has(name))
   );
 }

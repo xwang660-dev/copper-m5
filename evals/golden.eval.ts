@@ -1,15 +1,18 @@
 // @vitest-environment node
-// `npm run eval`: asks Ask Copper every question in the golden set, has the AI
-// judge grade each answer, sends the scores to Langfuse, and fails when too
+// `npm run eval`: asks Ask Copper every question in the golden set, once for
+// each agent setup (two agents, and one single agent with every tool), has the
+// AI judge grade each answer, sends the scores to Langfuse, and fails when too
 // few answers pass. It runs the real model, so it needs the Google key (and
-// the Langfuse keys, to keep the scores). GitHub Actions runs it on every
-// pull request.
-import { appendFileSync } from "node:fs";
+// the Langfuse keys, to keep the scores). GitHub Actions runs it on every pull
+// request and shows the comparison on the pull request.
+import { appendFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { emptyDesk, GOLDEN_SET, type GoldenCase } from "@/evals/golden-set";
 import { judge, PASS_SCORE, toolsOk, type Answer } from "@/evals/judge";
+import { buildReport, type CaseResult, summarize } from "@/evals/report";
 import { postScore } from "@/evals/scores";
-import { isAiConfigured } from "@/lib/ai/call";
+import { AGENT_MODE, ALL_VARIANTS, type Variant } from "@/evals/variants";
+import { isAiConfigured, usageMeter } from "@/lib/ai/call";
 import { flushTraces, langfuseEnabled } from "@/lib/ai/langfuse";
 import { registerLangfuse } from "@/lib/ai/langfuse-register";
 import { finalValue } from "@/lib/ai/live";
@@ -20,42 +23,49 @@ import { toolCallsOf } from "@/lib/copper/assistant/progress";
 const MIN_PASS_RATE = Number(process.env.EVAL_MIN_PASS_RATE ?? "0.8");
 /** Names this run in Langfuse, to find its traces and scores. */
 const RUN = process.env.EVAL_RUN ?? `local-${new Date().toISOString()}`;
-/** Which agent setup is being graded (Part 4 compares two). */
-const VARIANT = process.env.EVAL_VARIANT ?? "two-agents";
+/** EVAL_VARIANTS=two-agents,single-agent picks the setups to grade. */
+const VARIANTS = (process.env.EVAL_VARIANTS?.split(",").map((v) => v.trim()) ??
+  ALL_VARIANTS) as Variant[];
+/** The setup the app ships today. CI holds this one to the pass-rate bar. */
+const GATE = (process.env.EVAL_GATE_VARIANT ?? "two-agents") as Variant;
 /** EVAL_ONLY=id1,id2 runs just those cases (to look into a failure). */
 const ONLY = process.env.EVAL_ONLY?.split(",").map((id) => id.trim());
 
-type Result = {
-  id: string;
-  pass: boolean;
-  score: number;
-  tools: boolean;
-  reason: string;
-  traced: boolean;
-};
-const results: Result[] = [];
+const results = new Map<Variant, CaseResult[]>(VARIANTS.map((v) => [v, []]));
 
-async function runOnce(golden: GoldenCase): Promise<Result> {
+async function runOnce(
+  golden: GoldenCase,
+  variant: Variant,
+): Promise<CaseResult> {
+  const before = { ...usageMeter };
+  const started = performance.now();
   const { progress, traceId } = await askCopper({
     messages: [{ role: "user", content: golden.question }],
     useTools: true,
     desk: golden.desk ?? emptyDesk(),
     agent: golden.agent,
-    traceLabels: { evalRun: RUN, variant: VARIANT, caseId: golden.id },
+    agentMode: AGENT_MODE[variant],
+    traceLabels: { evalRun: RUN, variant, caseId: golden.id },
   });
   const final = await finalValue(progress);
+  const seconds = (performance.now() - started) / 1000;
+  // What the answer cost, before the judge's own call is added to the meter.
+  const costUsd = usageMeter.costUsd - before.costUsd;
+  const tokens =
+    usageMeter.inputTokens +
+    usageMeter.outputTokens -
+    (before.inputTokens + before.outputTokens);
   if (final.status === "error")
     throw new Error("The chat ended with an error.");
   const answer: Answer = { reply: final.reply, tools: toolCallsOf(final) };
   const verdict = await judge(golden, answer);
-  const tools = toolsOk(golden, answer);
+  const tools = toolsOk(golden, answer, variant);
   const pass = tools && verdict.score >= PASS_SCORE;
 
   // The chat has already sent its trace, so the scores can attach to it.
-  let traced = false;
   if (traceId) {
-    const comment = `${VARIANT} · ${RUN} · ${golden.id}`;
-    const sent = await Promise.all([
+    const comment = `${variant} · ${RUN} · ${golden.id}`;
+    await Promise.all([
       postScore({
         traceId,
         name: "judge_score",
@@ -78,7 +88,6 @@ async function runOnce(golden: GoldenCase): Promise<Result> {
         comment,
       }),
     ]);
-    traced = sent.every(Boolean);
   }
   return {
     id: golden.id,
@@ -86,7 +95,9 @@ async function runOnce(golden: GoldenCase): Promise<Result> {
     score: verdict.score,
     tools,
     reason: verdict.reason,
-    traced,
+    costUsd,
+    seconds,
+    tokens,
   };
 }
 
@@ -95,32 +106,18 @@ async function runOnce(golden: GoldenCase): Promise<Result> {
  * service shouldn't fail the whole run. A wrong answer is not retried, only a
  * chat that ended with an error.
  */
-async function runCase(golden: GoldenCase): Promise<Result> {
+async function runCase(
+  golden: GoldenCase,
+  variant: Variant,
+): Promise<CaseResult> {
   for (const wait of [8_000, 20_000]) {
     try {
-      return await runOnce(golden);
+      return await runOnce(golden, variant);
     } catch {
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
-  return runOnce(golden);
-}
-
-function summary(): string {
-  const passed = results.filter((r) => r.pass).length;
-  const lines = [
-    `## Golden set: ${VARIANT}`,
-    "",
-    `Run \`${RUN}\`: ${passed} of ${results.length} passed (needs ${Math.round(MIN_PASS_RATE * 100)}%).`,
-    "",
-    "| Case | Result | Judge | Tools | Why |",
-    "| --- | --- | --- | --- | --- |",
-    ...results.map(
-      (r) =>
-        `| ${r.id} | ${r.pass ? "pass" : "FAIL"} | ${r.score}/5 | ${r.tools ? "ok" : "wrong"} | ${r.reason.replace(/\|/g, "/")} |`,
-    ),
-  ];
-  return lines.join("\n");
+  return runOnce(golden, variant);
 }
 
 describe("golden set", () => {
@@ -138,32 +135,48 @@ describe("golden set", () => {
 
   registerLangfuse();
 
-  describe("each question", () => {
-    for (const golden of GOLDEN_SET.filter((g) => !ONLY || ONLY.includes(g.id)))
-      it(
-        golden.id,
-        async () => {
-          const result = await runCase(golden);
-          results.push(result);
-          expect(
-            result.pass,
-            `${result.reason} (judge ${result.score}/5, tools ${result.tools ? "ok" : "wrong"})`,
-          ).toBe(true);
-        },
-        180_000,
-      );
-  });
+  for (const variant of VARIANTS)
+    describe(variant, () => {
+      for (const golden of GOLDEN_SET.filter(
+        (g) => !ONLY || ONLY.includes(g.id),
+      ))
+        it(
+          golden.id,
+          async () => {
+            const result = await runCase(golden, variant);
+            results.get(variant)?.push(result);
+            // Only the shipped setup fails the run on a bad case; the other
+            // is being compared, and its numbers go in the report.
+            if (variant === GATE)
+              expect(
+                result.pass,
+                `${result.reason} (judge ${result.score}/5, tools ${result.tools ? "ok" : "wrong"})`,
+              ).toBe(true);
+          },
+          180_000,
+        );
+    });
 
   it("passes enough of the golden set", async () => {
     await flushTraces();
-    const text = summary();
-    console.info(`\n${text}\n`);
+    const report = buildReport({
+      run: RUN,
+      variants: VARIANTS.map((variant) => ({
+        variant,
+        cases: results.get(variant) ?? [],
+      })),
+      minPassRate: MIN_PASS_RATE,
+      gate: GATE,
+    });
+    console.info(`\n${report}\n`);
+    // CI posts this file as a comment on the pull request.
+    writeFileSync("eval-report.md", report);
     if (process.env.GITHUB_STEP_SUMMARY)
-      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);
     if (!langfuseEnabled())
       console.info("Langfuse keys not set: scores were not sent.");
-    const rate =
-      results.filter((r) => r.pass).length / Math.max(results.length, 1);
-    expect(rate).toBeGreaterThanOrEqual(MIN_PASS_RATE);
+    expect(
+      summarize({ variant: GATE, cases: results.get(GATE) ?? [] }).passRate,
+    ).toBeGreaterThanOrEqual(MIN_PASS_RATE);
   });
 });

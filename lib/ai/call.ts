@@ -79,8 +79,23 @@ function languageModel(model: ModelId) {
   return google()(id);
 }
 
+/**
+ * A running total of every model call in this process. The evals read it
+ * before and after an answer to see what that answer cost (Module 5).
+ */
+export const usageMeter = {
+  calls: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  costUsd: 0,
+};
+
 /** Prints one line per model call, so the cost and time are visible. */
 async function logCall(row: AiCallRow): Promise<void> {
+  usageMeter.calls += 1;
+  usageMeter.inputTokens += row.input_tokens ?? 0;
+  usageMeter.outputTokens += row.output_tokens ?? 0;
+  usageMeter.costUsd += row.cost_usd ?? 0;
   console.info("[ai_calls]", JSON.stringify(row));
 }
 

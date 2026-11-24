@@ -134,3 +134,90 @@ describe("sending a score to Langfuse", () => {
     expect(await postScore(score)).toBe(false);
   });
 });
+
+describe("single agent vs multi agent", () => {
+  const refund = GOLDEN_SET.find((g) => g.id === "refund-under-limit")!;
+  const answer = (...names: string[]) => ({
+    reply: "ok",
+    tools: names.map((name) => ({ name })),
+  });
+
+  it("asks only the two-agent setup for the handoff", () => {
+    expect(refund.mustCall).toContain("transfer_to_refund_agent");
+    const noHandoff = answer("get_orders", "request_refund");
+    expect(toolsOk(refund, noHandoff, "two-agents")).toBe(false);
+    expect(toolsOk(refund, noHandoff, "single-agent")).toBe(true);
+  });
+
+  it("gives the single agent every tool and no handoff", async () => {
+    const { singleAgentTools, copperTools, refundAgentTools } =
+      await import("@/lib/copper/assistant/tools");
+    const desk = { limitUsd: 50, refunds: [] };
+    const names = Object.keys(singleAgentTools(desk));
+    for (const name of Object.keys(copperTools)) expect(names).toContain(name);
+    expect(names).toEqual(
+      expect.arrayContaining(["get_orders", "request_refund"]),
+    );
+    expect(names.some((name) => name.startsWith("transfer_"))).toBe(false);
+    // Same refund tools as the Refund agent, so the rule is the same code.
+    expect(Object.keys(refundAgentTools(desk))).toContain("request_refund");
+  });
+});
+
+describe("the comparison report", () => {
+  const cases = (pass: boolean, cost: number, seconds: number) => [
+    {
+      id: "a",
+      pass,
+      score: pass ? 5 : 2,
+      tools: true,
+      reason: "A | B",
+      costUsd: cost,
+      seconds,
+      tokens: 1000,
+    },
+    {
+      id: "b",
+      pass: true,
+      score: 5,
+      tools: true,
+      reason: "fine",
+      costUsd: cost,
+      seconds,
+      tokens: 3000,
+    },
+  ];
+
+  it("works out pass rate, cost and speed per setup", async () => {
+    const { summarize } = await import("@/evals/report");
+    const s = summarize({
+      variant: "two-agents",
+      cases: cases(false, 0.002, 10),
+    });
+    expect(s.passed).toBe(1);
+    expect(s.passRate).toBe(0.5);
+    expect(s.avgCostUsd).toBeCloseTo(0.002);
+    expect(s.avgSeconds).toBe(10);
+    expect(s.avgTokens).toBe(2000);
+  });
+
+  it("shows both setups side by side, keeps the tag, and escapes table pipes", async () => {
+    const { buildReport, REPORT_MARKER } = await import("@/evals/report");
+    const text = buildReport({
+      run: "github-1",
+      minPassRate: 0.8,
+      gate: "two-agents",
+      variants: [
+        { variant: "two-agents", cases: cases(true, 0.002, 10) },
+        { variant: "single-agent", cases: cases(false, 0.001, 5) },
+      ],
+    });
+    expect(text.startsWith(REPORT_MARKER)).toBe(true);
+    expect(text).toContain("| two-agents (shipped) | 2 of 2 | 100%");
+    expect(text).toContain("| single-agent | 1 of 2 | 50%");
+    expect(text).toContain("$0.00100");
+    expect(text).toContain("5.0 s");
+    expect(text).toContain("**FAIL**");
+    expect(text).toContain("A / B");
+  });
+});

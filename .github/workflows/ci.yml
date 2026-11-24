@@ -24,15 +24,21 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  # The golden-set evaluation: the real model answers every question, an AI
-  # judge grades each answer, and the scores go to Langfuse. It runs on pull
-  # requests only (it calls the model, so not on every push) and must pass to
-  # merge. The keys are in the repo's Actions secrets.
+  # The golden-set evaluation: the real model answers every question with
+  # the two-agent setup and with the single agent, an AI judge grades each
+  # answer, and the scores go to Langfuse. The comparison (pass rate, cost and
+  # time per question) is posted on the pull request. It runs on pull requests
+  # only (it calls the model, so not on every push) and the two-agent setup
+  # must pass for the pull request to merge. The keys are in the repo's
+  # Actions secrets.
   eval:
     name: eval
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
     concurrency:
       group: eval-${{ github.ref }}
       cancel-in-progress: true
@@ -50,4 +56,19 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
           EVAL_RUN: github-${{ github.run_id }}-${{ github.run_attempt }}
-          EVAL_VARIANT: two-agents
+      # Shows the scores on the pull request, pass or fail. One comment, kept
+      # up to date. (A pull request from a fork can't comment; that's fine.)
+      - name: Show the scores on the pull request
+        if: always() && hashFiles('eval-report.md') != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate             --jq '[.[] | select(.body | contains("<!-- copper-eval-report -->")) | .id] | first // empty')
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@eval-report.md
+          else
+            gh pr comment "$PR" --repo "$REPO" --body-file eval-report.md
+          fi
